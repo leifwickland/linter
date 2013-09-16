@@ -20,6 +20,10 @@ import scala.tools.nsc.{Global, Phase}
 import scala.tools.nsc.plugins.{Plugin, PluginComponent}
 import collection.mutable
 
+object LinterPlugin {
+
+}
+
 class LinterPlugin(val global: Global) extends Plugin {
   import global._
   import Utils._
@@ -28,7 +32,18 @@ class LinterPlugin(val global: Global) extends Plugin {
   val description = "a static analysis compiler plugin"
   val components = List[PluginComponent](PreTyperComponent, PostTyperComponent, PostTyperInterpreterComponent, PostRefChecksComponent)
   
-  override val optionsHelp: Option[String] = Some("  -P:linter No options yet, just letting you know I'm here")
+  override val optionsHelp: Option[String] = Some(Seq(
+    "%s:comma,separated,warning,names".format(name, LinterOptions.EnableOnlyArgument),
+    "%s:comma,separated,warning,names".format(name, LinterOptions.DisableOnlyArgument)
+  ).map("  -P:" + name + ":" + _).mkString("\n"))
+
+	override def processOptions(options: List[String], error: String => Unit) {
+    LinterOptions.parse(options) match {
+     case Left(errorMessage) => error(errorMessage)
+     case Right(LinterOptions(disabledWarnings)) => 
+       Utils.disabledWarningNames = disabledWarnings
+    }
+  }
 
   val inferred = mutable.HashSet[Position]() // Used for a scala 2.9 hack (can't find out which types are inferred)
 
@@ -56,7 +71,7 @@ class LinterPlugin(val global: Global) extends Plugin {
           //println((sealedTraits, usedTraits))
           for(unusedTrait <- sealedTraits.filterNot(st => usedTraits.exists(_.toString == st._1.toString))) {
             //TODO: It might still be used in some type-signature somewhere... see scalaz
-            warn(unusedTrait._2, "This sealed trait is never extended.")(unit)
+            warn(unusedTrait._2, UnextendedSealedTrait)(unit)
           }
         }
       }
@@ -288,14 +303,14 @@ class LinterPlugin(val global: Global) extends Plugin {
           //TODO: maybe make checks to protect against potentially wrong fixes, e.g. log1p(a + 1) or log1p(a - 1)
           // also, check 1-exp(x) and other negated versions
           case Apply(log, List(Apply(Select(Literal(Constant(1)), nme.ADD), _))) if log is "scala.math.`package`.log" => 
-            warn(tree, "Use math.log1p(x) instead of math.log(1 + x) for added accuracy when x is near 0")
+            warn(tree, UseLog1p)
           case Apply(log, List(Apply(Select(_, nme.ADD), List(Literal(Constant(1)))))) if log is "scala.math.`package`.log" => 
-            warn(tree, "Use math.log1p(x) instead of math.log(x + 1) for added accuracy when x is near 0")
+            warn(tree, UseLog1p)
             
           case Apply(Select(Apply(exp, _), nme.SUB), List(Literal(Constant(1)))) if exp is "scala.math.`package`.exp" => 
-            warn(tree, "Use math.expm1(x) instead of math.exp(x) - 1 for added accuracy when x is near 0.")
+            warn(tree, UseExpm1)
           case Apply(Select(Literal(Constant(-1)), nme.ADD), List(Apply(exp, _))) if exp is "scala.math.`package`.exp" =>
-            warn(tree, "Use math.expm1(x) instead of -1 + math.exp(x) for added accuracy when x is near 0.")
+            warn(tree, UseExpm1)
 
           /// Use x.abs instead of doing it manually
           case Apply(sqrt, List(Apply(pow, List(expr, Literal(Constant(2))))))
@@ -424,8 +439,7 @@ class LinterPlugin(val global: Global) extends Plugin {
             && !isSubtype(lhs, rhs) && !isSubtype(rhs, lhs)
             && lhs.tpe.widen.toString != "Null" && rhs.tpe.widen.toString != "Null" =>
             
-            val warnMsg = "Comparing with == on instances of different types (%s, %s) will probably return false."
-            warn(eqeq, warnMsg.format(lhs.tpe.widen, rhs.tpe.widen))
+            warn(eqeq, new UnlikelyEquality(lhs.tpe.widen.toString, rhs.tpe.widen.toString))
 
           /// Warn agains importing from collection.JavaConversions
           case Import(pkg, selectors) if (pkg.symbol == JavaConversionsModule) && (selectors exists isGlobalImport) =>
